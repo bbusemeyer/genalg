@@ -1,5 +1,6 @@
 import numpy as np
 import subprocess as sub
+from copy import deepcopy
 
 class GeneticOptimizer:
   def __init__(self,fitness,breed):
@@ -13,11 +14,11 @@ class GeneticOptimizer:
     self.fitness = fitness
     self.breed = breed
     self.best_fitness = -np.inf
-    self.best_candidate = None
+    self.best_solution = None
     self.population = None
 
   def optimize(self,init_pop, mutate_frac=0.1, nparents=2, 
-      elitist_frac=0.1, max_gens=1000, fitness_tol=np.inf, nthread=8):
+      elitist_frac=0.1, max_gens=1000, fitness_goal=np.inf, nthread=8):
     """ 
     Perform genetic optimization on space defined by `self.fitness` and `init_pop`.
     mutate is the fraction of mutation for the gene.
@@ -27,10 +28,28 @@ class GeneticOptimizer:
     Keeps population constant, so breeding fraction is determined by number of
     parents.
     """
-    self.best_fitness = max([self.fitness(unit) for unit in init_pop])
     self.population = init_pop
     for gen in range(max_gens):
-      if self.best_fitness > fitness_tol: break
+      fitnesses = [self.fitness(unit) for unit in self.population]
+      best = np.argmax(fitnesses)
+      self.best_fitness = fitnesses[best]
+      self.best_solution = self.population[best]
+      if self.best_fitness > fitness_goal: break
+
+      # Breed population by sampling best fitnesses.
+      norm = np.linalg.norm(fitnesses,1)
+      grabp = [fitness/norm for fitness in fitnesses]
+      sel = np.random.choice(range(len(self.population)),
+          nparents,replace=False,p=grabp)
+      self.population = [ 
+          self.breed([self.population[i] for i in sel]) 
+          for unit in self.population
+        ]
+      
+      #TODO mutate.
+    if gen+1==max_gens: 
+      print("Warning: did not reach fitness goal.")
+    return self.best_fitness
 
 class BinPackingProblem:
   def __init__(self,packages,binsize=1.0):
@@ -55,7 +74,17 @@ class BinPackingProblem:
     return packings, fillings
 
   def compute_greedy_solution(self,order=None):
-    if order is None: order = np.argsort(self.packages)
+    if type(order)==str:
+      if order == 'sorted': 
+        order = np.argsort(self.packages)[::-1]
+      elif order=='backwards': 
+        order = np.argsort(self.packages)
+      else: 
+        order = np.arange(len(self.packages))
+        np.random.shuffle(order)
+    else:
+      order = np.arange(len(self.packages))
+      np.random.shuffle(order)
     packings = [[]]
     fillings = [0.0]
     for pidx in order:
@@ -63,9 +92,15 @@ class BinPackingProblem:
     return packings
 
   def evaluate(self,packings):
+    packed = [package for pack in packings for package in pack]
+    packed = set(packed)
     fillings = self.compute_fillings(packings)
+    if len(packed)!=len(self.packages):
+      print("evaluate finds failed: some packages not packed.")
+      return 0.0
     for filling in fillings:
       if filling>self.binsize:
+        print("evaluate finds failed: some packs overfilled.")
         return 0.0
     return sum(fillings) / (self.binsize*len(packings))
 
@@ -81,10 +116,13 @@ class BinPackingGenAlg(BinPackingProblem):
         nremoved,p=premoved,replace=False)
     copyover = np.random.choice(range(len(packings_list[1])),
         nremoved,p=pcopy,replace=False)
+    new_packings = deepcopy(packings_list[0])
+    new_fillings = deepcopy(fillings_list[0])
     for remidx,packidx in enumerate(removed):
-      packings_list[0][packidx] = packings_list[1][copyover[remidx]]
-      fillings_list[0][packidx] = fillings_list[1][copyover[remidx]]
-    return self._fix_packings(packings_list[0],fillings_list[0])
+      new_packings[packidx] = packings_list[1][copyover[remidx]]
+      new_fillings[packidx] = fillings_list[1][copyover[remidx]]
+    ret = self._fix_packings(new_packings,new_fillings)[0]
+    return ret
 
   def mutate_packings(self,packings_list):
     #TODO
@@ -101,6 +139,7 @@ class BinPackingGenAlg(BinPackingProblem):
         repack.extend(packset.difference(done))
       else:
         done = done.union(packset)
+    repack.extend(set(range(len(self.packages))).difference(done))
     for pidx in repack:
       self.greedy_pack(pidx,packings,fillings)
     return packings, fillings
