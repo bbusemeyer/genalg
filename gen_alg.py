@@ -1,9 +1,14 @@
 import numpy as np
+import time
 import subprocess as sub
+import multiprocessing as mp
+import matplotlib.pyplot as plt
+import plot_tools as pt
+pt.matplotlib_header()
 from copy import deepcopy
 
 class GeneticOptimizer:
-  def __init__(self,fitness,breed):
+  def __init__(self,fitness,breed,nthreads=1):
     """ 
     fitness(sol) is a function that defines the fitness of a solution. Space of
     solutions is implicitly defined by fitness function. 
@@ -14,11 +19,14 @@ class GeneticOptimizer:
     self.fitness = fitness
     self.breed = breed
     self.best_fitness = -np.inf
+    self.best_fitness_history = []
     self.best_solution = None
     self.population = None
+    self.nthreads = nthreads
+
 
   def optimize(self,init_pop, mutate_frac=0.1, nparents=2, 
-      elitist_frac=0.1, max_gens=1000, fitness_goal=np.inf, nthread=8):
+      elitist_frac=0.0, max_gens=1000, fitness_goal=np.inf):
     """ 
     Perform genetic optimization on space defined by `self.fitness` and `init_pop`.
     mutate is the fraction of mutation for the gene.
@@ -29,22 +37,30 @@ class GeneticOptimizer:
     parents.
     """
     self.population = init_pop
+    keep = int(round(elitist_frac*len(self.population)))
     for gen in range(max_gens):
       fitnesses = [self.fitness(unit) for unit in self.population]
-      best = np.argmax(fitnesses)
-      self.best_fitness = fitnesses[best]
-      self.best_solution = self.population[best]
+      #best_order = [np.argmax(fitnesses)]
+      best_order = np.argsort(fitnesses)
+      self.best_fitness = fitnesses[best_order[-1]]
+      self.best_fitness_history.append(self.best_fitness)
+      self.best_solution = self.population[best_order[-1]]
       if self.best_fitness > fitness_goal: break
 
       # Breed population by sampling best fitnesses.
       norm = np.linalg.norm(fitnesses,1)
       grabp = [fitness/norm for fitness in fitnesses]
-      sel = np.random.choice(range(len(self.population)),
-          nparents,replace=False,p=grabp)
-      self.population = [ 
-          self.breed([self.population[i] for i in sel]) 
-          for unit in self.population
+      breed_pairs = [
+          [
+            self.population[packidx] for packidx in 
+            np.random.choice(range(len(self.population)),nparents,replace=False,p=grabp)
+          ]
+          for p in self.population[keep:]
         ]
+      self.population = [self.population[pidx] for pidx in best_order[-keep:]] +\
+          [self.breed(pair) for pair in breed_pairs]
+      #self.population = [self.best_solution] +\
+      #    [self.breed(pair) for pair in breed_pairs]
       
       #TODO mutate.
     if gen+1==max_gens: 
@@ -73,18 +89,20 @@ class BinPackingProblem:
     fillings.append([self.packages[pidx]])
     return packings, fillings
 
-  def compute_greedy_solution(self,order=None):
-    if type(order)==str:
-      if order == 'sorted': 
-        order = np.argsort(self.packages)[::-1]
-      elif order=='backwards': 
-        order = np.argsort(self.packages)
-      else: 
-        order = np.arange(len(self.packages))
-        np.random.shuffle(order)
-    else:
+  def compute_greedy_solution(self,order='unsorted'):
+    if order == 'sorted': 
+      order = np.argsort(self.packages)[::-1]
+    elif order=='backwards': 
+      order = np.argsort(self.packages)
+    elif order=='unsorted':
       order = np.arange(len(self.packages))
       np.random.shuffle(order)
+    else: 
+      raise AssertionError("""
+      Illegal order value: %s. 
+      Available settings: 'sorted','backwards', or 'unsorted' (default).
+      """%order)
+
     packings = [[]]
     fillings = [0.0]
     for pidx in order:
@@ -143,3 +161,66 @@ class BinPackingGenAlg(BinPackingProblem):
     for pidx in repack:
       self.greedy_pack(pidx,packings,fillings)
     return packings, fillings
+
+def greedy_hist(size,order='unsorted',stats=1000):
+  fig,ax = plt.subplots(1,1)
+  res = []
+  for i in range(stats):
+    prob = BinPackingProblem(np.random.random(size))
+    res.append(prob.evaluate(prob.compute_greedy_solution(order)))
+  n,bins = np.histogram(res,normed=True)
+  ax.bar(bins[:-1],n/n.sum(),width=bins[0]-bins[1])
+  ax.set_xlabel("Filling fraction")
+  ax.set_ylabel("Fraction of runs")
+  return fig,ax
+
+def stat_greedy(order='sort',stats=300,size=100):
+  ret = 0.0
+  for i in range(stats):
+    prob = BinPackingGenAlg(np.random.random(size))
+    ret += prob.evaluate(prob.compute_greedy_solution(order))
+  return ret/stats
+
+def plot_size_trend(powers,stats=300,size=100):
+  fig,ax = plt.subplots(1,1)
+  res = []
+  for i in [10*j for j in powers]:
+    res.append((
+        stat_greedy(order='sorted',   stats=stats,size=size),
+        stat_greedy(order='unsorted',       stats=stats,size=size),
+        stat_greedy(order='backwards',stats=stats,size=size)
+      ))
+  res = np.array(res).T
+  ax.semilogx(10**powers,res[0],label='sort')
+  ax.semilogx(10**powers,res[1],label='unsort')
+  ax.semilogx(10**powers,res[2],label='backwards')
+  ax.legend(loc='best',frameon=True)
+  ax.set_xlabel("Number of packages")
+  ax.set_ylabel("Fill fraction")
+  return fig,ax
+
+def test_genalg(max_gens,popsize,npackages,max_package=1.0):
+	# Compare to random sampling of the same number of generations.
+	prob = BinPackingGenAlg(np.random.random(npackages)*max_package)
+	init_pop = [prob.compute_greedy_solution() for i in range(max_gens-2)]+\
+			[prob.compute_greedy_solution('sorted'),prob.compute_greedy_solution('backwards')]
+	init_fitnesses = [prob.evaluate(packings) for packings in init_pop]
+	best_rand = max(init_fitnesses)
+	print("Best random",best_rand)
+
+	# Now optimize it with genetic algorithm.
+	init_pop = [prob.compute_greedy_solution() for i in range(popsize-2)]+\
+			[prob.compute_greedy_solution('sorted'),prob.compute_greedy_solution('backwards')]
+	init_fitnesses = [prob.evaluate(packings) for packings in init_pop]
+	optimizer = GeneticOptimizer(prob.evaluate,prob.breed_packings,nthreads=1)
+	start=time.clock()
+	optimizer.optimize(init_pop,elitist_frac=0.1,max_gens=100)
+	end=time.clock()
+	print("Best Vol. Frac.",optimizer.best_fitness)
+	print("Time:",end-start)
+	print("Generations",len(optimizer.best_fitness_history))
+	plt.axhline(best_rand,color='k')
+	plt.plot([dat for dat in optimizer.best_fitness_history])
+	plt.ylabel("Volume fraction")
+	plt.xlabel("Generation")
+
