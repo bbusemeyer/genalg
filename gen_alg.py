@@ -1,4 +1,5 @@
 import numpy as np
+from functools import partial
 import time
 import subprocess as sub
 import multiprocessing as mp
@@ -26,7 +27,7 @@ class GeneticOptimizer:
 
 
   def optimize(self,init_pop, mutate_frac=0.1, nparents=2, 
-      elitist_frac=0.0, max_gens=1000, fitness_goal=np.inf):
+      elitist_frac=0.0, max_gens=1000, fitness_goal=np.inf, warn=False):
     """ 
     Perform genetic optimization on space defined by `self.fitness` and `init_pop`.
     mutate is the fraction of mutation for the gene.
@@ -63,7 +64,7 @@ class GeneticOptimizer:
       #    [self.breed(pair) for pair in breed_pairs]
       
       #TODO mutate.
-    if gen+1==max_gens: 
+    if gen+1==max_gens and warn: 
       print("Warning: did not reach fitness goal.")
     return self.best_fitness
 
@@ -162,16 +163,13 @@ class BinPackingGenAlg(BinPackingProblem):
       self.greedy_pack(pidx,packings,fillings)
     return packings, fillings
 
-def greedy_hist(size,order='unsorted',stats=1000):
-  fig,ax = plt.subplots(1,1)
+def greedy_hist(fig,ax,size,order='unsorted',stats=1000):
   res = []
   for i in range(stats):
     prob = BinPackingProblem(np.random.random(size))
     res.append(prob.evaluate(prob.compute_greedy_solution(order)))
   n,bins = np.histogram(res,normed=True)
   ax.bar(bins[:-1],n/n.sum(),width=bins[0]-bins[1])
-  ax.set_xlabel("Filling fraction")
-  ax.set_ylabel("Fraction of runs")
   return fig,ax
 
 def stat_greedy(order='sort',stats=300,size=100):
@@ -224,3 +222,54 @@ def test_genalg(max_gens,popsize,npackages,max_package=1.0):
 	plt.ylabel("Volume fraction")
 	plt.xlabel("Generation")
 
+def _perform_genalg(dummy,max_gens,popsize,npackages,max_package=1.0):
+  prob = BinPackingGenAlg(np.random.random(npackages)*max_package)
+  init_pop = [prob.compute_greedy_solution() for i in range(popsize-2)]+\
+      [prob.compute_greedy_solution('sorted'),prob.compute_greedy_solution('backwards')]
+  init_fitnesses = [prob.evaluate(packings) for packings in init_pop]
+  optimizer = GeneticOptimizer(prob.evaluate,prob.breed_packings,nthreads=1)
+  start=time.clock()
+  optimizer.optimize(init_pop,elitist_frac=0.1,max_gens=100)
+  end=time.clock()
+  return optimizer.best_fitness
+
+def genalg_hist(fig,ax,stats,max_gens,popsize,npackages,max_package=1.0):
+  onerun = partial(_perform_genalg, 
+      max_gens=max_gens,
+      popsize=popsize,
+      npackages=npackages,
+      max_package=max_package
+    )
+  with mp.Pool(8) as pool:
+    res = pool.map(onerun,list(range(stats)))
+
+  n,bins = np.histogram(res,normed=True)
+  ax.bar(bins[:-1],n/n.sum(),width=bins[0]-bins[1])
+  
+def scan_max_package(fig,ax,stats,max_gens,popsize,npackages,max_packages):
+  res = np.zeros(len(max_packages))
+  for midx,max_package in enumerate(max_packages):
+    print("Done with ",max_package)
+    onerun = partial(_perform_genalg, 
+        max_gens=max_gens,
+        popsize=popsize,
+        npackages=npackages,
+        max_package=max_package
+      )
+    with mp.Pool(8) as pool:
+      res[midx] = np.array(pool.map(onerun,list(range(stats)))).mean()
+  ax.plot(res)
+  
+def scan_popsize(fig,ax,stats,max_gens,popsizes,npackages,max_package):
+  res = np.zeros(len(popsizes))
+  for midx,popsize in enumerate(popsizes):
+    print("Done with ",popsize)
+    onerun = partial(_perform_genalg, 
+        max_gens=max_gens,
+        popsize=popsize,
+        npackages=npackages,
+        max_package=max_package
+      )
+    with mp.Pool(8) as pool:
+      res[midx] = np.array(pool.map(onerun,list(range(stats)))).mean()
+  ax.plot(res)
